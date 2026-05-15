@@ -2,15 +2,17 @@
 """
 mcp_server.py — MCP-server för LiU:s SOU-databas och dokumentkedjor.
 
-Exponerar fyra verktyg:
-  search_sou             Fritextsökning i SOU:er 1922–idag (LiU:s Solr-API)
-  get_sou                Metadata för specifik SOU, t.ex. "2025:108"
-  fetch_sou_content      Laddar ned och extraherar text ur SOU-PDF (med OCR-fallback)
+Exponerar upp till fyra verktyg (styrda via .env-flaggor):
+  search_sou               Fritextsökning i SOU:er 1922–idag (LiU:s Solr-API)
+  get_sou                  Metadata för specifik SOU, t.ex. "2025:108"
+  fetch_sou_content        Laddar ned och extraherar text ur SOU-PDF (med OCR-fallback)
   find_document_relations  Tvåriktad kedjesökning:
-                           - SOU YYYY:N → propositioner/betänkanden/skrivelser som behandlar den
-                           - Prop/skr/bet → SOU:er som nämns i dokumenttexten
+                             - SOU YYYY:N → propositioner/betänkanden/skrivelser som behandlar den
+                             - Prop/skr/bet → SOU:er som nämns i dokumenttexten
 
 Transport styrs via MCP_TRANSPORT i .env: stdio (standard) eller http.
+Databas styrs via DATABASE_URL: postgresql://... (standard) eller sqlite:///...
+SOU_SOKNING_AKTIV / SOU_HAMTNING_AKTIV styr om sök- resp. hämtningsverktyg exponeras.
 """
 
 import asyncio
@@ -19,10 +21,12 @@ import json
 import logging
 import os
 import re
+import sqlite3
 import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -44,15 +48,20 @@ PDF_CACHE_DIR = Path(os.getenv("PDF_CACHE_DIR", str(_SCRIPT_DIR / "pdf_cache")))
 # Ankra relativa sökvägar mot skriptets mapp (inte processens cwd)
 if not PDF_CACHE_DIR.is_absolute():
     PDF_CACHE_DIR = _SCRIPT_DIR / PDF_CACHE_DIR
+
 MCP_TRANSPORT = os.getenv("MCP_TRANSPORT", "stdio")
+
+DATABASE_URL        = os.getenv("DATABASE_URL", "")
+PDF_CACHE_TTL_DAGAR = int(os.getenv("PDF_CACHE_TTL_DAGAR", "1"))
+SOU_SOKNING_AKTIV   = os.getenv("SOU_SOKNING_AKTIV",  "true").lower() == "true"
+SOU_HAMTNING_AKTIV  = os.getenv("SOU_HAMTNING_AKTIV", "true").lower() == "true"
 
 RIKSDAG_DOK_BASE  = "https://data.riksdagen.se/dokumentlista/"
 RIKSDAG_TEXT_BASE = "https://data.riksdagen.se/dokument/"
 
-HEADERS = {"User-Agent": "liu-sou-mcp/0.1 (akademiskt projekt; kontakt via GitHub)"}
+HEADERS = {"User-Agent": "liu-sou-mcp/1.1 (akademiskt projekt; kontakt via GitHub)"}
 
 # Årsöversikter som nämner i stort sett alla SOU:er — filtreras bort som brus.
-# Dessa är Regeringens skrivelser av årsrapportskaraktär, inte substantiella svar.
 BRUS_TITLAR = [
     "Kommittéberättelse",
     "Riksdagens skrivelser till regeringen – åtgärder",
@@ -90,6 +99,229 @@ def _tysta_subprocess_stdout():
         os.close(spara_ut)
         os.close(spara_fel)
         os.close(log_fd)
+
+
+# ── Databas: dubbelt backend-mönster (PostgreSQL / SQLite) ────────────────────
+
+def _ar_postgres() -> bool:
+    """Returnerar True om DATABASE_URL pekar på PostgreSQL."""
+    return DATABASE_URL.startswith("postgresql")
+
+
+def _hamta_db():
+    """Returnerar en ny databasanslutning."""
+    if _ar_postgres():
+        import psycopg2
+        return psycopg2.connect(DATABASE_URL)
+    # SQLite: tolka DATABASE_URL eller använd standardfil bredvid skriptet
+    if DATABASE_URL.startswith("sqlite:///"):
+        sokvag = DATABASE_URL.replace("sqlite:///", "")
+    else:
+        sokvag = "liu_sou_cache.db"
+    if not Path(sokvag).is_absolute():
+        sokvag = str(_SCRIPT_DIR / sokvag)
+    return sqlite3.connect(sokvag)
+
+
+def _prefix() -> str:
+    """Returnerar schema-prefix för tabellnamn: 'liu_sou.' eller ''."""
+    return "liu_sou." if _ar_postgres() else ""
+
+
+def _ph() -> str:
+    """Returnerar platshållarsyntax för parametrar: %s (Postgres) eller ? (SQLite)."""
+    return "%s" if _ar_postgres() else "?"
+
+
+def _now() -> str:
+    """Returnerar SQL-uttryck för aktuell tidsstämpel."""
+    return "NOW()" if _ar_postgres() else "datetime('now')"
+
+
+def _initialisera_schema() -> None:
+    """Skapar schema och tabeller om de inte finns. Körs vid serveruppstart."""
+    try:
+        conn = _hamta_db()
+        cur  = conn.cursor()
+
+        if _ar_postgres():
+            cur.execute("CREATE SCHEMA IF NOT EXISTS liu_sou")
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS liu_sou.pdf_cache (
+                    sou_beteckning TEXT PRIMARY KEY,
+                    titel          TEXT,
+                    ar             INTEGER,
+                    url            TEXT,
+                    fulltext_md    TEXT,
+                    pdf_sokvag     TEXT,
+                    hamtad_ts      TIMESTAMP DEFAULT NOW()
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS liu_sou.sync_status (
+                    nyckel TEXT PRIMARY KEY,
+                    varde  TEXT
+                )
+            """)
+        else:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS pdf_cache (
+                    sou_beteckning TEXT PRIMARY KEY,
+                    titel          TEXT,
+                    ar             INTEGER,
+                    url            TEXT,
+                    fulltext_md    TEXT,
+                    pdf_sokvag     TEXT,
+                    hamtad_ts      TEXT DEFAULT (datetime('now'))
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS sync_status (
+                    nyckel TEXT PRIMARY KEY,
+                    varde  TEXT
+                )
+            """)
+
+        conn.commit()
+        cur.close()
+        conn.close()
+        logger.info("Databasschema liu_sou initialiserat")
+    except Exception as e:
+        logger.warning("Kunde inte initialisera databasschema: %s", e)
+
+
+def _spara_i_pdf_cache(
+    sou_beteckning: str,
+    url: str,
+    fulltext_md: str,
+    pdf_sokvag: Optional[str],
+    titel: Optional[str] = None,
+    ar: Optional[int] = None,
+) -> None:
+    """Sparar eller uppdaterar en post i pdf_cache-tabellen."""
+    ph = _ph()
+    p  = _prefix()
+    try:
+        conn = _hamta_db()
+        cur  = conn.cursor()
+        if _ar_postgres():
+            cur.execute(
+                f"""INSERT INTO {p}pdf_cache
+                        (sou_beteckning, titel, ar, url, fulltext_md, pdf_sokvag, hamtad_ts)
+                    VALUES ({ph},{ph},{ph},{ph},{ph},{ph},NOW())
+                    ON CONFLICT (sou_beteckning) DO UPDATE SET
+                        fulltext_md = EXCLUDED.fulltext_md,
+                        pdf_sokvag  = EXCLUDED.pdf_sokvag,
+                        hamtad_ts   = NOW()
+                """,
+                (sou_beteckning, titel, ar, url, fulltext_md, pdf_sokvag),
+            )
+        else:
+            cur.execute(
+                f"""INSERT INTO {p}pdf_cache
+                        (sou_beteckning, titel, ar, url, fulltext_md, pdf_sokvag, hamtad_ts)
+                    VALUES ({ph},{ph},{ph},{ph},{ph},{ph},datetime('now'))
+                    ON CONFLICT (sou_beteckning) DO UPDATE SET
+                        fulltext_md = excluded.fulltext_md,
+                        pdf_sokvag  = excluded.pdf_sokvag,
+                        hamtad_ts   = datetime('now')
+                """,
+                (sou_beteckning, titel, ar, url, fulltext_md, pdf_sokvag),
+            )
+        conn.commit()
+        cur.close()
+        conn.close()
+        logger.info("Sparade fulltext i DB-cache för SOU %s", sou_beteckning)
+    except Exception as e:
+        logger.warning("Kunde inte spara i pdf_cache: %s", e)
+
+
+def _hamta_fran_pdf_cache(sou_beteckning: str) -> Optional[str]:
+    """Returnerar cachad fulltext_md för en SOU-beteckning, eller None."""
+    try:
+        conn = _hamta_db()
+        cur  = conn.cursor()
+        cur.execute(
+            f"SELECT fulltext_md FROM {_prefix()}pdf_cache WHERE sou_beteckning = {_ph()}",
+            (sou_beteckning,),
+        )
+        rad = cur.fetchone()
+        cur.close()
+        conn.close()
+        if rad and rad[0]:
+            return rad[0]
+    except Exception as e:
+        logger.warning("Kunde inte läsa från pdf_cache: %s", e)
+    return None
+
+
+def _nolla_pdf_sokvag(sou_beteckning: str) -> None:
+    """Sätter pdf_sokvag = NULL efter att filen raderats."""
+    try:
+        conn = _hamta_db()
+        cur  = conn.cursor()
+        cur.execute(
+            f"UPDATE {_prefix()}pdf_cache SET pdf_sokvag = NULL WHERE sou_beteckning = {_ph()}",
+            (sou_beteckning,),
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        logger.warning("Kunde inte nolla pdf_sokvag för %s: %s", sou_beteckning, e)
+
+
+def stada_pdf_cache() -> dict:
+    """Raderar PDF-filer vars fulltext finns i databasen och som är äldre
+    än PDF_CACHE_TTL_DAGAR dagar (standard: 1 dag).
+
+    Filer där fulltext_md IS NULL lämnas kvar för retry.
+    Returnerar statistik: {raderade, bevarade, fel}.
+    """
+    gransvarde = datetime.utcnow() - timedelta(days=PDF_CACHE_TTL_DAGAR)
+    raderade = bevarade = fel = 0
+
+    try:
+        conn = _hamta_db()
+        cur  = conn.cursor()
+        cur.execute(
+            f"SELECT sou_beteckning, pdf_sokvag FROM {_prefix()}pdf_cache "
+            f"WHERE fulltext_md IS NOT NULL AND pdf_sokvag IS NOT NULL"
+        )
+        rader = cur.fetchall()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        logger.warning("stada_pdf_cache: kunde inte läsa från DB: %s", e)
+        return {"raderade": 0, "bevarade": 0, "fel": 1}
+
+    for beteckning, sokvag_str in rader:
+        if not sokvag_str:
+            continue
+        fil = Path(sokvag_str)
+        if not fil.exists():
+            _nolla_pdf_sokvag(beteckning)
+            continue
+        try:
+            andrad = datetime.utcfromtimestamp(fil.stat().st_mtime)
+            if andrad > gransvarde:
+                bevarade += 1
+                continue
+        except Exception:
+            pass
+        try:
+            fil.unlink()
+            _nolla_pdf_sokvag(beteckning)
+            raderade += 1
+        except Exception as e:
+            logger.warning("Kunde inte radera %s: %s", fil.name, e)
+            fel += 1
+
+    logger.info(
+        "PDF-cache städad: %d raderade, %d bevarade (yngre än %d dag(ar)), %d fel",
+        raderade, bevarade, PDF_CACHE_TTL_DAGAR, fel,
+    )
+    return {"raderade": raderade, "bevarade": bevarade, "fel": fel}
 
 
 # ── HTTP-hjälpfunktioner ───────────────────────────────────────────────────────
@@ -167,16 +399,16 @@ def _formatera_riksdagsdok(d: dict) -> str:
 # ── PDF-pipeline ───────────────────────────────────────────────────────────────
 
 def _hamta_och_casha_pdf(url: str, cache_nyckel: str) -> Path:
-    """Laddar ned PDF och sparar i cache. Returnerar sökväg."""
+    """Laddar ned PDF och sparar i filcache. Returnerar sökväg."""
     PDF_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     cache_fil = PDF_CACHE_DIR / f"{cache_nyckel}.pdf"
     if cache_fil.exists():
-        logger.info("PDF-cache träff: %s", cache_nyckel)
+        logger.info("Filcache träff: %s", cache_nyckel)
         return cache_fil
     logger.info("Laddar ned PDF: %s", url)
     pdf_bytes = _get(url, timeout=60)
     cache_fil.write_bytes(pdf_bytes)
-    logger.info("PDF cachad: %s (%d bytes)", cache_nyckel, len(pdf_bytes))
+    logger.info("PDF cachad lokalt: %s (%d bytes)", cache_nyckel, len(pdf_bytes))
     return cache_fil
 
 
@@ -193,123 +425,135 @@ def _extrahera_text(pdf_vag: Path, sidor: Optional[list[int]] = None) -> str:
 
 server = Server("liu-sou")
 
-VERKTYG = [
-    Tool(
-        name="search_sou",
-        description=(
-            "Söker i Linköpings universitetsbiblioteks fulltextdatabas över svenska statliga "
-            "offentliga utredningar (SOU 1922–idag). Returnerar beteckning, titel, år och PDF-URL. "
-            "Använd get_sou för att hämta metadata för en specifik beteckning, eller "
-            "fetch_sou_content för att läsa innehållet."
-        ),
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "Fritextsökning i SOU-fulltext, t.ex. 'miljöbalken skadestånd'"
-                },
-                "year_from": {"type": "integer", "description": "Filtrera från och med detta år"},
-                "year_to":   {"type": "integer", "description": "Filtrera till och med detta år"},
-                "max_results": {
-                    "type": "integer",
-                    "description": "Max antal träffar (standard 10)",
-                    "default": 10
-                },
-            },
-            "required": ["query"],
-        },
+# Verktygsdefinitioner — filtreras vid lista_verktyg() baserat på .env-flaggor
+
+_TOOL_SEARCH_SOU = Tool(
+    name="search_sou",
+    description=(
+        "Söker i Linköpings universitetsbiblioteks fulltextdatabas över svenska statliga "
+        "offentliga utredningar (SOU 1922–idag). Returnerar beteckning, titel, år och PDF-URL. "
+        "Använd get_sou för att hämta metadata för en specifik beteckning, eller "
+        "fetch_sou_content för att läsa innehållet."
     ),
-    Tool(
-        name="get_sou",
-        description=(
-            "Hämtar metadata för en specifik SOU baserat på beteckning, t.ex. '2025:108' eller '1969:46'. "
-            "Returnerar beteckning, titel, år, ISBN och PDF-URL. "
-            "En SOU kan ha flera delar — alla returneras."
-        ),
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "namn": {
-                    "type": "string",
-                    "description": "SOU-beteckning, t.ex. '2025:108'"
-                }
+    inputSchema={
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "Fritextsökning i SOU-fulltext, t.ex. 'miljöbalken skadestånd'"
             },
-            "required": ["namn"],
-        },
-    ),
-    Tool(
-        name="fetch_sou_content",
-        description=(
-            "Laddar ned och extraherar text ur en SOU-PDF. "
-            "Hanterar automatiskt moderna digitala SOU:er (1997+) och äldre KB-digitaliserade "
-            "skanningar (1922–1996) med OCR-fallback. "
-            "PDF-URL:en hämtas med get_sou eller search_sou. "
-            "Stora dokument kan ta 10–30 sekunder."
-        ),
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "url":  {
-                    "type": "string",
-                    "description": "PDF-URL från get_sou eller search_sou"
-                },
-                "namn": {
-                    "type": "string",
-                    "description": "SOU-beteckning, t.ex. '2025:108' — används som cache-nyckel"
-                },
-                "sidor": {
-                    "type": "array",
-                    "items": {"type": "integer"},
-                    "description": "Sidnummer att extrahera (0-indexerat). Utelämna för hela dokumentet."
-                },
+            "year_from": {"type": "integer", "description": "Filtrera från och med detta år"},
+            "year_to":   {"type": "integer", "description": "Filtrera till och med detta år"},
+            "max_results": {
+                "type": "integer",
+                "description": "Max antal träffar (standard 10)",
+                "default": 10
             },
-            "required": ["url", "namn"],
         },
+        "required": ["query"],
+    },
+)
+
+_TOOL_GET_SOU = Tool(
+    name="get_sou",
+    description=(
+        "Hämtar metadata för en specifik SOU baserat på beteckning, t.ex. '2025:108' eller '1969:46'. "
+        "Returnerar beteckning, titel, år, ISBN och PDF-URL. "
+        "En SOU kan ha flera delar — alla returneras."
     ),
-    Tool(
-        name="find_document_relations",
-        description=(
-            "Tvåriktad kedjesökning för att knyta ihop riksdagens dokumentkedja.\n\n"
-            "Om beteckning är en SOU (format YYYY:N, t.ex. '2025:108'):\n"
-            "  → Söker i riksdagen efter propositioner, betänkanden och "
-            "regeringsskrivelser som behandlar SOU:n. "
-            "Substantiella svar returneras; årsöversikter (Kommittéberättelse m.fl.) filtreras bort.\n\n"
-            "Om beteckning är ett riksdagsdokument (prop/skr/bet, format YYYY/YY:N, t.ex. '2025/26:136'):\n"
-            "  → Hämtar dokumentets text från riksdagen och extraherar alla SOU-beteckningar "
-            "som nämns i texten.\n\n"
-            "Möjliggör traversering av hela kedjan: "
-            "prejudikat → lagparagraf → proposition → SOU → remissvar."
-        ),
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "beteckning": {
-                    "type": "string",
-                    "description": (
-                        "SOU-beteckning (t.ex. '2025:108') eller riksdagsdokumentets beteckning "
-                        "(t.ex. '2025/26:136')"
-                    )
-                },
-                "doktyper": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": (
-                        "Dokumenttyper att inkludera vid SOU-sökning. "
-                        "Standard: ['prop', 'skr', 'bet', 'dir']. "
-                        "Möjliga värden: prop, skr, bet, dir, rir, komm."
-                    )
-                },
+    inputSchema={
+        "type": "object",
+        "properties": {
+            "namn": {
+                "type": "string",
+                "description": "SOU-beteckning, t.ex. '2025:108'"
+            }
+        },
+        "required": ["namn"],
+    },
+)
+
+_TOOL_FETCH_SOU_CONTENT = Tool(
+    name="fetch_sou_content",
+    description=(
+        "Laddar ned och extraherar text ur en SOU-PDF. "
+        "Hanterar automatiskt moderna digitala SOU:er (1997+) och äldre KB-digitaliserade "
+        "skanningar (1922–1996) med OCR-fallback. "
+        "PDF-URL:en hämtas med get_sou eller search_sou. "
+        "Fulltext för hela dokument cachas i databasen — efterföljande anrop returnerar "
+        "direkt från cache utan ny nedladdning. "
+        "Stora dokument kan ta 10–30 sekunder vid första hämtning."
+    ),
+    inputSchema={
+        "type": "object",
+        "properties": {
+            "url": {
+                "type": "string",
+                "description": "PDF-URL från get_sou eller search_sou"
             },
-            "required": ["beteckning"],
+            "namn": {
+                "type": "string",
+                "description": "SOU-beteckning, t.ex. '2025:108' — används som cache-nyckel"
+            },
+            "sidor": {
+                "type": "array",
+                "items": {"type": "integer"},
+                "description": "Sidnummer att extrahera (0-indexerat). Utelämna för hela dokumentet."
+            },
         },
+        "required": ["url", "namn"],
+    },
+)
+
+_TOOL_FIND_RELATIONS = Tool(
+    name="find_document_relations",
+    description=(
+        "Tvåriktad kedjesökning för att knyta ihop riksdagens dokumentkedja.\n\n"
+        "Om beteckning är en SOU (format YYYY:N, t.ex. '2025:108'):\n"
+        "  → Söker i riksdagen efter propositioner, betänkanden och "
+        "regeringsskrivelser som behandlar SOU:n. "
+        "Substantiella svar returneras; årsöversikter (Kommittéberättelse m.fl.) filtreras bort.\n\n"
+        "Om beteckning är ett riksdagsdokument (prop/skr/bet, format YYYY/YY:N, t.ex. '2025/26:136'):\n"
+        "  → Hämtar dokumentets text från riksdagen och extraherar alla SOU-beteckningar "
+        "som nämns i texten.\n\n"
+        "Möjliggör traversering av hela kedjan: "
+        "prejudikat → lagparagraf → proposition → SOU → remissvar."
     ),
-]
+    inputSchema={
+        "type": "object",
+        "properties": {
+            "beteckning": {
+                "type": "string",
+                "description": (
+                    "SOU-beteckning (t.ex. '2025:108') eller riksdagsdokumentets beteckning "
+                    "(t.ex. '2025/26:136')"
+                )
+            },
+            "doktyper": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Dokumenttyper att inkludera vid SOU-sökning. "
+                    "Standard: ['prop', 'skr', 'bet', 'dir']. "
+                    "Möjliga värden: prop, skr, bet, dir, rir, komm."
+                )
+            },
+        },
+        "required": ["beteckning"],
+    },
+)
 
 
 @server.list_tools()
-async def lista_verktyg():
-    return VERKTYG
+async def lista_verktyg() -> list[Tool]:
+    """Returnerar aktiva verktyg baserat på SOU_SOKNING_AKTIV och SOU_HAMTNING_AKTIV."""
+    verktyg: list[Tool] = []
+    if SOU_SOKNING_AKTIV:
+        verktyg.extend([_TOOL_SEARCH_SOU, _TOOL_GET_SOU])
+    if SOU_HAMTNING_AKTIV:
+        verktyg.append(_TOOL_FETCH_SOU_CONTENT)
+    verktyg.append(_TOOL_FIND_RELATIONS)  # alltid aktiv — söker riksdagens API, inte SOU-PDF:er
+    return verktyg
 
 
 @server.call_tool()
@@ -338,6 +582,9 @@ async def _search_sou(
     year_to: Optional[int]   = None,
     max_results: int = 10,
 ) -> list[TextContent]:
+    if not SOU_SOKNING_AKTIV:
+        return [TextContent(type="text", text="SOU-sökning är inaktiverad på denna server (SOU_SOKNING_AKTIV=false i .env).")]
+
     params: dict = {
         "q":    f"fritext:{query}",
         "fl":   "namn,titel,ar,url,isbn",
@@ -369,6 +616,9 @@ async def _search_sou(
 
 
 async def _get_sou(namn: str) -> list[TextContent]:
+    if not SOU_SOKNING_AKTIV:
+        return [TextContent(type="text", text="SOU-sökning är inaktiverad på denna server (SOU_SOKNING_AKTIV=false i .env).")]
+
     escaped = namn.replace(":", "\\:")
     svar = _liu_sok({"q": f"namn:{escaped}", "fl": "id,namn,titel,ar,nummer,isbn,url"})
     docs = svar["response"]["docs"]
@@ -392,6 +642,16 @@ async def _fetch_sou_content(
     namn: str,
     sidor: Optional[list[int]] = None,
 ) -> list[TextContent]:
+    if not SOU_HAMTNING_AKTIV:
+        return [TextContent(type="text", text="SOU-hämtning är inaktiverad på denna server (SOU_HAMTNING_AKTIV=false i .env).")]
+
+    # Kontrollera DB-cache för hela dokument (inte delsidor — de är tillfälliga förfrågningar)
+    if sidor is None:
+        cachad_text = _hamta_fran_pdf_cache(namn)
+        if cachad_text:
+            logger.info("DB-cache träff för SOU %s", namn)
+            return [TextContent(type="text", text=f"# SOU {namn}\n\n{cachad_text}")]
+
     # Äldre SOU:er (1922–1996) har KB URN-adresser som kräver upplösning
     if "urn.kb.se" in url:
         logger.info("Löser KB URN: %s", url)
@@ -415,6 +675,16 @@ async def _fetch_sou_content(
 
     text = _extrahera_text(pdf_vag, sidor)
 
+    # Spara hela dokument i DB-cache och radera PDF-filen direkt
+    if sidor is None:
+        _spara_i_pdf_cache(namn, url, text, str(pdf_vag))
+        try:
+            pdf_vag.unlink()
+            _nolla_pdf_sokvag(namn)
+            logger.info("PDF raderad direkt efter extraktion: %s", pdf_vag.name)
+        except Exception as e:
+            logger.warning("Kunde inte radera PDF %s: %s", pdf_vag.name, e)
+
     sidor_info = f"sidor {sidor}" if sidor else f"alla {antal_sidor} sidor"
     return [TextContent(type="text", text=f"# SOU {namn} ({sidor_info})\n\n{text}")]
 
@@ -426,12 +696,10 @@ async def _find_document_relations(
     """Tvåriktad kedjesökning: SOU→riksdagsdokument eller riksdagsdok→SOU:er."""
 
     # ── Riktning 1: SOU → riksdagsdokument ──────────────────────────────────
-    # SOU-beteckningar har formatet YYYY:N (t.ex. 2025:108)
     if re.match(r"^\d{4}:\d+$", beteckning.strip()):
         return await _sou_till_riksdagsdok(beteckning.strip(), doktyper)
 
     # ── Riktning 2: Riksdagsdokument → SOU-beteckningar ─────────────────────
-    # Propositioner, skrivelser m.fl. har formatet YYYY/YY:N (t.ex. 2025/26:136)
     return await _riksdagsdok_till_souer(beteckning.strip())
 
 
@@ -505,18 +773,15 @@ async def _sou_till_riksdagsdok(
 async def _riksdagsdok_till_souer(beteckning: str) -> list[TextContent]:
     """Riksdagsdokument YYYY/YY:N → SOU-beteckningar som nämns i texten."""
 
-    # Hitta dokumentet i riksdagens API
     docs = _riksdag_sok(beteckning, antal=10)
 
-    # Filtrera till det dokument vars beteckning matchar exakt
-    # (sökningen kan returnera dokument som nämner beteckningen i texten)
     exakta = [
         d for d in docs
         if d.get("beteckning", "").strip() == beteckning.split(":")[-1].strip()
         or beteckning in (d.get("rm", "") + "/" + d.get("beteckning", ""))
     ]
     if not exakta:
-        exakta = docs  # Fallback: ta första träffen
+        exakta = docs
 
     if not exakta:
         return [TextContent(
@@ -537,7 +802,6 @@ async def _riksdagsdok_till_souer(beteckning: str) -> list[TextContent]:
             text=f"Kunde inte hämta dokument-id för {beteckning}."
         )]
 
-    # Hämta dokumenttext och extrahera SOU-beteckningar
     try:
         html = _hamta_riksdag_text(dok_id)
     except urllib.error.URLError as e:
@@ -577,6 +841,9 @@ async def _kor_stdio():
 
 
 def main():
+    _initialisera_schema()
+    stada_pdf_cache()  # städar eventuella rester från tidigare körning
+
     if MCP_TRANSPORT == "http":
         from mcp.server.sse import SseServerTransport
         from starlette.applications import Starlette
