@@ -6,6 +6,24 @@ Versionshantering följer [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [2.0.0] — ej publicerad
+
+### Brytande ändringar
+- **K6 — Beteckningsformat:** SOU-beteckningar i returobjekt ändrade från `"YYYY/N"` till `"YYYY:N"` för att matcha det format API:et tar emot och som riksdagsdata använder. Berör fältet `sou_beteckning` i svaren från `find_document_relations`.
+- **K7 — HTTP-transport:** Standardtransport för `MCP_TRANSPORT=http` ändrad från SSE (`sse_app()`) till Streamable HTTP (`streamable_http_app()`). SSE används som fallback om det nyare biblioteket saknas. Klienter som förlitar sig på SSE-endpunkten `/sse` behöver uppdateras.
+- **K9 — Modulstruktur:** Databasfunktionerna extraherade till separat modul `db.py`. Installations­skript som importerar interna funktioner direkt från `mcp_server` behöver uppdateras.
+
+## [1.2.0] — 2026-05-20
+
+### Tillagt
+- **Verifikationsloop i `find_document_relations`:** Kandidatdokument från riksdagens API verifieras nu mot riksdagens fulltextindex innan de returneras. Minskar falskt positiva träffar vid sökning av SOU → riksdagsdokument. Batch-storlek 2 parallellt (upp till 8 kandidater), sekventiellt därefter — balanserar svarstid mot belastning på riksdagens servrar.
+
+### Ändrat
+- Felmeddelande i `find_document_relations` (riktning riksdagsdok → SOU) förtydligat: anger nu att parentesreferenser utan `SOU`-prefix inte fångas och hänvisar till dokumentets referenslista på riksdagen.se.
+
+### Rättat
+- `SyntaxError` i `02_explore_fields.py` (rad 68): trasigt regex-mönster ersatt med korrekt escape-sekvens.
+
 ## [1.1.0] — 2026-05-15
 
 ### Tillagt
@@ -20,7 +38,7 @@ Versionshantering följer [Semantic Versioning](https://semver.org/).
 - **`stada_pdf_cache()` anropas vid uppstart** i `main()` — städar eventuella rester från körningar där serverprocessen kraschade mellan extraktion och filradering.
 
 ### Ändrat
-- `DATABASE_URL` standarddatabas ändrad till `riksdagstryck` (konsekvent med övriga arbetsströmmar i projektet).
+- `DATABASE_URL` standarddatabas ändrad till `riksdagstryck` (konsekvent med övriga MCP-servrar i projektet).
 - Verktygsdefinitioner refaktorerade till namngivna konstanter (`_TOOL_SEARCH_SOU` m.fl.) för att möjliggöra dynamisk verktygslista.
 - User-Agent bumpad till `liu-sou-mcp/1.1`.
 

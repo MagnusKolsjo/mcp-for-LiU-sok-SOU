@@ -40,8 +40,8 @@ Prejudikat (HD/HFD)
 ## Installation
 
 ```bash
-git clone https://github.com/<anvandare>/liu-sou-mcp.git
-cd liu-sou-mcp
+git clone https://github.com/MagnusKolsjo/mcp-for-LiU-sok-SOU.git
+cd mcp-for-LiU-sok-SOU
 pip install -r requirements.txt
 cp config.example.env .env
 # Fyll i LIU_API_KEY i .env
@@ -51,9 +51,9 @@ cp config.example.env .env
 
 Testnyckel `test` fungerar direkt men returnerar max 5 träffar per sökning.
 
-För fullständig åtkomst: kontakta Anders Fåk, Linköpings universitetsbibliotek
-(`anders.fak@liu.se`) och beskriv kortfattat hur du avser använda API:et.
-Det är en akademisk öppen datatjänst — förfrågan är vanligtvis okomplicerad.
+För fullständig åtkomst: mejla Tekniska utvecklingsgruppen, Linköpings
+universitetsbibliotek (`sysaccount@bibl.liu.se`) och beskriv kortfattat hur
+du avser använda API:et.
 
 ## Konfiguration i MCP-klient
 
@@ -61,9 +61,9 @@ Lägg till i din MCP-klientkonfiguration (t.ex. `claude_desktop_config.json`):
 
 ```json
 "liu-sou": {
-  "command": "/absolut/sökväg/till/liu-sou-mcp/.venv/bin/python3",
-  "args": ["/absolut/sökväg/till/liu-sou-mcp/mcp_server.py"],
-  "cwd": "/absolut/sökväg/till/liu-sou-mcp"
+  "command": "/absolut/sökväg/till/mcp-for-LiU-sok-SOU/.venv/bin/python3",
+  "args": ["/absolut/sökväg/till/mcp-for-LiU-sok-SOU/mcp_server.py"],
+  "cwd": "/absolut/sökväg/till/mcp-for-LiU-sok-SOU"
 }
 ```
 

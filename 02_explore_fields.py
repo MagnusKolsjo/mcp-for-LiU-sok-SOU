@@ -41,7 +41,7 @@ from dotenv import load_dotenv
 load_dotenv()
 API_KEY = os.getenv("LIU_API_KEY", "test")
 API_BASE = os.getenv("LIU_API_BASE", "https://www2.bibl.liu.se/api/sou_api/getdata.aspx")
-HEADERS = {"User-Agent": "liu-sou-mcp/0.1 (akademiskt projekt; kontakt via GitHub)"}
+HEADERS = {"User-Agent": "mcp-for-LiU-sok-SOU/1.0 (+https://github.com/MagnusKolsjo/mcp-for-LiU-sok-SOU)"}
 
 
 def sok(params: dict) -> dict:
@@ -65,7 +65,7 @@ def hamta_pdf_url_fran_kb_urn(urn_url: str) -> str | None:
     with urllib.request.urlopen(req, timeout=15) as r:
         html = r.read().decode("utf-8", errors="replace")
     
-    pdf_lankar = re.findall(r'href=["'](https://weburn\.kb\.se/[^"\']+\.pdf)["']', html)
+    pdf_lankar = re.findall(r'href=["\']+(https://weburn\.kb\.se/[^"\']+\.pdf)["\']+', html)
     return pdf_lankar[0] if pdf_lankar else None
 
 

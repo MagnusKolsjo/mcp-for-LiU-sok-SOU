@@ -21,12 +21,10 @@ import json
 import logging
 import os
 import re
-import sqlite3
 import sys
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -59,7 +57,7 @@ SOU_HAMTNING_AKTIV  = os.getenv("SOU_HAMTNING_AKTIV", "true").lower() == "true"
 RIKSDAG_DOK_BASE  = "https://data.riksdagen.se/dokumentlista/"
 RIKSDAG_TEXT_BASE = "https://data.riksdagen.se/dokument/"
 
-HEADERS = {"User-Agent": "liu-sou-mcp/1.1 (akademiskt projekt; kontakt via GitHub)"}
+HEADERS = {"User-Agent": "mcp-for-LiU-sok-SOU/1.0 (+https://github.com/MagnusKolsjo/mcp-for-LiU-sok-SOU)"}
 
 # Årsöversikter som nämner i stort sett alla SOU:er — filtreras bort som brus.
 BRUS_TITLAR = [
@@ -101,227 +99,19 @@ def _tysta_subprocess_stdout():
         os.close(log_fd)
 
 
-# ── Databas: dubbelt backend-mönster (PostgreSQL / SQLite) ────────────────────
-
-def _ar_postgres() -> bool:
-    """Returnerar True om DATABASE_URL pekar på PostgreSQL."""
-    return DATABASE_URL.startswith("postgresql")
-
-
-def _hamta_db():
-    """Returnerar en ny databasanslutning."""
-    if _ar_postgres():
-        import psycopg2
-        return psycopg2.connect(DATABASE_URL)
-    # SQLite: tolka DATABASE_URL eller använd standardfil bredvid skriptet
-    if DATABASE_URL.startswith("sqlite:///"):
-        sokvag = DATABASE_URL.replace("sqlite:///", "")
-    else:
-        sokvag = "liu_sou_cache.db"
-    if not Path(sokvag).is_absolute():
-        sokvag = str(_SCRIPT_DIR / sokvag)
-    return sqlite3.connect(sokvag)
-
-
-def _prefix() -> str:
-    """Returnerar schema-prefix för tabellnamn: 'liu_sou.' eller ''."""
-    return "liu_sou." if _ar_postgres() else ""
-
-
-def _ph() -> str:
-    """Returnerar platshållarsyntax för parametrar: %s (Postgres) eller ? (SQLite)."""
-    return "%s" if _ar_postgres() else "?"
-
-
-def _now() -> str:
-    """Returnerar SQL-uttryck för aktuell tidsstämpel."""
-    return "NOW()" if _ar_postgres() else "datetime('now')"
-
-
-def _initialisera_schema() -> None:
-    """Skapar schema och tabeller om de inte finns. Körs vid serveruppstart."""
-    try:
-        conn = _hamta_db()
-        cur  = conn.cursor()
-
-        if _ar_postgres():
-            cur.execute("CREATE SCHEMA IF NOT EXISTS liu_sou")
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS liu_sou.pdf_cache (
-                    sou_beteckning TEXT PRIMARY KEY,
-                    titel          TEXT,
-                    ar             INTEGER,
-                    url            TEXT,
-                    fulltext_md    TEXT,
-                    pdf_sokvag     TEXT,
-                    hamtad_ts      TIMESTAMP DEFAULT NOW()
-                )
-            """)
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS liu_sou.sync_status (
-                    nyckel TEXT PRIMARY KEY,
-                    varde  TEXT
-                )
-            """)
-        else:
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS pdf_cache (
-                    sou_beteckning TEXT PRIMARY KEY,
-                    titel          TEXT,
-                    ar             INTEGER,
-                    url            TEXT,
-                    fulltext_md    TEXT,
-                    pdf_sokvag     TEXT,
-                    hamtad_ts      TEXT DEFAULT (datetime('now'))
-                )
-            """)
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS sync_status (
-                    nyckel TEXT PRIMARY KEY,
-                    varde  TEXT
-                )
-            """)
-
-        conn.commit()
-        cur.close()
-        conn.close()
-        logger.info("Databasschema liu_sou initialiserat")
-    except Exception as e:
-        logger.warning("Kunde inte initialisera databasschema: %s", e)
-
-
-def _spara_i_pdf_cache(
-    sou_beteckning: str,
-    url: str,
-    fulltext_md: str,
-    pdf_sokvag: Optional[str],
-    titel: Optional[str] = None,
-    ar: Optional[int] = None,
-) -> None:
-    """Sparar eller uppdaterar en post i pdf_cache-tabellen."""
-    ph = _ph()
-    p  = _prefix()
-    try:
-        conn = _hamta_db()
-        cur  = conn.cursor()
-        if _ar_postgres():
-            cur.execute(
-                f"""INSERT INTO {p}pdf_cache
-                        (sou_beteckning, titel, ar, url, fulltext_md, pdf_sokvag, hamtad_ts)
-                    VALUES ({ph},{ph},{ph},{ph},{ph},{ph},NOW())
-                    ON CONFLICT (sou_beteckning) DO UPDATE SET
-                        fulltext_md = EXCLUDED.fulltext_md,
-                        pdf_sokvag  = EXCLUDED.pdf_sokvag,
-                        hamtad_ts   = NOW()
-                """,
-                (sou_beteckning, titel, ar, url, fulltext_md, pdf_sokvag),
-            )
-        else:
-            cur.execute(
-                f"""INSERT INTO {p}pdf_cache
-                        (sou_beteckning, titel, ar, url, fulltext_md, pdf_sokvag, hamtad_ts)
-                    VALUES ({ph},{ph},{ph},{ph},{ph},{ph},datetime('now'))
-                    ON CONFLICT (sou_beteckning) DO UPDATE SET
-                        fulltext_md = excluded.fulltext_md,
-                        pdf_sokvag  = excluded.pdf_sokvag,
-                        hamtad_ts   = datetime('now')
-                """,
-                (sou_beteckning, titel, ar, url, fulltext_md, pdf_sokvag),
-            )
-        conn.commit()
-        cur.close()
-        conn.close()
-        logger.info("Sparade fulltext i DB-cache för SOU %s", sou_beteckning)
-    except Exception as e:
-        logger.warning("Kunde inte spara i pdf_cache: %s", e)
-
-
-def _hamta_fran_pdf_cache(sou_beteckning: str) -> Optional[str]:
-    """Returnerar cachad fulltext_md för en SOU-beteckning, eller None."""
-    try:
-        conn = _hamta_db()
-        cur  = conn.cursor()
-        cur.execute(
-            f"SELECT fulltext_md FROM {_prefix()}pdf_cache WHERE sou_beteckning = {_ph()}",
-            (sou_beteckning,),
-        )
-        rad = cur.fetchone()
-        cur.close()
-        conn.close()
-        if rad and rad[0]:
-            return rad[0]
-    except Exception as e:
-        logger.warning("Kunde inte läsa från pdf_cache: %s", e)
-    return None
-
-
-def _nolla_pdf_sokvag(sou_beteckning: str) -> None:
-    """Sätter pdf_sokvag = NULL efter att filen raderats."""
-    try:
-        conn = _hamta_db()
-        cur  = conn.cursor()
-        cur.execute(
-            f"UPDATE {_prefix()}pdf_cache SET pdf_sokvag = NULL WHERE sou_beteckning = {_ph()}",
-            (sou_beteckning,),
-        )
-        conn.commit()
-        cur.close()
-        conn.close()
-    except Exception as e:
-        logger.warning("Kunde inte nolla pdf_sokvag för %s: %s", sou_beteckning, e)
-
-
-def stada_pdf_cache() -> dict:
-    """Raderar PDF-filer vars fulltext finns i databasen och som är äldre
-    än PDF_CACHE_TTL_DAGAR dagar (standard: 1 dag).
-
-    Filer där fulltext_md IS NULL lämnas kvar för retry.
-    Returnerar statistik: {raderade, bevarade, fel}.
-    """
-    gransvarde = datetime.utcnow() - timedelta(days=PDF_CACHE_TTL_DAGAR)
-    raderade = bevarade = fel = 0
-
-    try:
-        conn = _hamta_db()
-        cur  = conn.cursor()
-        cur.execute(
-            f"SELECT sou_beteckning, pdf_sokvag FROM {_prefix()}pdf_cache "
-            f"WHERE fulltext_md IS NOT NULL AND pdf_sokvag IS NOT NULL"
-        )
-        rader = cur.fetchall()
-        cur.close()
-        conn.close()
-    except Exception as e:
-        logger.warning("stada_pdf_cache: kunde inte läsa från DB: %s", e)
-        return {"raderade": 0, "bevarade": 0, "fel": 1}
-
-    for beteckning, sokvag_str in rader:
-        if not sokvag_str:
-            continue
-        fil = Path(sokvag_str)
-        if not fil.exists():
-            _nolla_pdf_sokvag(beteckning)
-            continue
-        try:
-            andrad = datetime.utcfromtimestamp(fil.stat().st_mtime)
-            if andrad > gransvarde:
-                bevarade += 1
-                continue
-        except Exception:
-            pass
-        try:
-            fil.unlink()
-            _nolla_pdf_sokvag(beteckning)
-            raderade += 1
-        except Exception as e:
-            logger.warning("Kunde inte radera %s: %s", fil.name, e)
-            fel += 1
-
-    logger.info(
-        "PDF-cache städad: %d raderade, %d bevarade (yngre än %d dag(ar)), %d fel",
-        raderade, bevarade, PDF_CACHE_TTL_DAGAR, fel,
-    )
-    return {"raderade": raderade, "bevarade": bevarade, "fel": fel}
+# ── Databas: importerat från db.py ────────────────────────────────────────────
+from db import (
+    _ar_postgres,
+    _hamta_db,
+    _ph,
+    _prefix,
+    _now,
+    _initialisera_schema,
+    _spara_i_pdf_cache,
+    _hamta_fran_pdf_cache,
+    _nolla_pdf_sokvag,
+    stada_pdf_cache,
+)
 
 
 # ── HTTP-hjälpfunktioner ───────────────────────────────────────────────────────
@@ -392,7 +182,7 @@ def _formatera_riksdagsdok(d: dict) -> str:
     beteckn  = d.get("beteckning", "")
     titel    = d.get("titel", "")
     datum    = d.get("datum", "")[:10]
-    ref = f"{rm}/{beteckn}".strip("/")
+    ref = f"{rm}:{beteckn}".strip(":")
     return f"[{subtyp}] {ref} ({datum}) — {titel}"
 
 
@@ -733,6 +523,38 @@ async def _sou_till_riksdagsdok(
         and d.get("typ", "") != "sou"
     ]
 
+    # Verifikationsfas: kontrollera att "SOU YYYY:N" faktiskt nämns i texten.
+    # Kandidater 1–8 körs i par om 2 (asyncio.to_thread); kandidat 9+ sekventiellt.
+    # Vid nätverksfel behålls kandidaten — bättre falsk positiv än missad träff.
+    _PARALLELL_GRANS = 8
+    _BATCH_STORLEK   = 2
+
+    async def _verifiera(d: dict, monster: re.Pattern) -> dict | None:
+        dok_id = d.get("id", "")
+        if not dok_id:
+            return None
+        try:
+            html = await asyncio.to_thread(_hamta_riksdag_text, dok_id)
+            return d if monster.search(html) else None
+        except Exception:
+            return d
+
+    sou_monster  = re.compile(r"\bSOU\s+" + re.escape(sou_beteckning) + r"\b")
+    parallella   = relevanta[:_PARALLELL_GRANS]
+    sekventiella = relevanta[_PARALLELL_GRANS:]
+
+    verifierade: list[dict] = []
+    for i in range(0, len(parallella), _BATCH_STORLEK):
+        batch   = parallella[i:i + _BATCH_STORLEK]
+        resultat = await asyncio.gather(*[_verifiera(d, sou_monster) for d in batch])
+        verifierade.extend(r for r in resultat if r is not None)
+    for d in sekventiella:
+        r = await _verifiera(d, sou_monster)
+        if r is not None:
+            verifierade.append(r)
+
+    relevanta = verifierade
+
     if not relevanta:
         return [TextContent(
             type="text",
@@ -778,7 +600,7 @@ async def _riksdagsdok_till_souer(beteckning: str) -> list[TextContent]:
     exakta = [
         d for d in docs
         if d.get("beteckning", "").strip() == beteckning.split(":")[-1].strip()
-        or beteckning in (d.get("rm", "") + "/" + d.get("beteckning", ""))
+        or beteckning in (d.get("rm", "") + ":" + d.get("beteckning", ""))
     ]
     if not exakta:
         exakta = docs
@@ -813,13 +635,15 @@ async def _riksdagsdok_till_souer(beteckning: str) -> list[TextContent]:
         return [TextContent(
             type="text",
             text=(
-                f"**{subtyp} {rm}/{beteckn}** — {titel}\n\n"
-                f"Inga SOU-beteckningar hittades i dokumenttexten."
+                f"**{subtyp} {rm}:{beteckn}** — {titel}\n\n"
+                f"Inga prefixade SOU-beteckningar (formen \"SOU YYYY:N\") hittades i dokumenttexten.\n"
+                f"Dokumentet kan referera till SOU:er via parentesform \"(YYYY:N)\" eller via\n"
+                f"betänkandets titel — verifiera mot dokumentets referenslista på riksdagen.se."
             )
         )]
 
     rader = [
-        f"## SOU:er nämnda i {subtyp} {rm}/{beteckn}",
+        f"## SOU:er nämnda i {subtyp} {rm}:{beteckn}",
         f"*{titel}*\n",
         f"Hittade {len(sou_refs)} SOU-beteckning(ar):\n",
     ]
@@ -840,40 +664,59 @@ async def _kor_stdio():
         await server.run(las, skriv, server.create_initialization_options())
 
 
+def _make_auth_app(asgi_app, api_key: str):
+    """Omsluter en ASGI-app med Bearer-token-autentisering."""
+    from starlette.applications import Starlette
+    from starlette.middleware import Middleware
+    from starlette.middleware.base import BaseHTTPMiddleware
+    from starlette.responses import PlainTextResponse
+    from starlette.routing import Mount
+
+    class ApiKeyMiddleware(BaseHTTPMiddleware):
+        async def dispatch(self, request, call_next):
+            token = (
+                request.headers.get("Authorization", "")
+                .removeprefix("Bearer ")
+                .strip()
+            )
+            if token != api_key:
+                return PlainTextResponse(
+                    "Obehörig: ogiltig eller saknad API-nyckel.", status_code=401
+                )
+            return await call_next(request)
+
+    return Starlette(
+        routes=[Mount("/", app=asgi_app)],
+        middleware=[Middleware(ApiKeyMiddleware)],
+    )
+
+
 def main():
     _initialisera_schema()
     stada_pdf_cache()  # städar eventuella rester från tidigare körning
 
     if MCP_TRANSPORT == "http":
-        from mcp.server.sse import SseServerTransport
-        from starlette.applications import Starlette
-        from starlette.middleware import Middleware
-        from starlette.middleware.base import BaseHTTPMiddleware
-        from starlette.responses import Response
-        from starlette.routing import Route
         import uvicorn
 
         api_nyckel = os.getenv("MCP_API_KEY")
 
-        class NyckelKontroll(BaseHTTPMiddleware):
-            async def dispatch(self, request, call_next):
-                if api_nyckel:
-                    if request.headers.get("Authorization") != f"Bearer {api_nyckel}":
-                        return Response("Otillåten", status_code=401)
-                return await call_next(request)
+        try:
+            asgi_app = mcp.streamable_http_app()
+        except AttributeError:
+            logger.warning("mcp.streamable_http_app() saknas — försöker med sse_app()")
+            asgi_app = mcp.sse_app()
 
-        transport = SseServerTransport("/messages/")
+        if api_nyckel:
+            logger.info("API-nyckelautentisering aktiverad")
+            app = _make_auth_app(asgi_app, api_nyckel)
+        else:
+            logger.warning(
+                "MCP_API_KEY är inte satt — servern körs utan autentisering. "
+                "Bind enbart till loopback (MCP_HOST=127.0.0.1) eller "
+                "skydda via reverse proxy."
+            )
+            app = asgi_app
 
-        async def handle_sse(request):
-            async with transport.connect_sse(
-                request.scope, request.receive, request._send
-            ) as (las, skriv):
-                await server.run(las, skriv, server.create_initialization_options())
-
-        app = Starlette(
-            routes=[Route("/sse", endpoint=handle_sse)],
-            middleware=[Middleware(NyckelKontroll)],
-        )
         host = os.getenv("MCP_HOST", "127.0.0.1")
         port = int(os.getenv("MCP_PORT", "8004"))
         logger.info("Startar HTTP-server på %s:%s", host, port)
