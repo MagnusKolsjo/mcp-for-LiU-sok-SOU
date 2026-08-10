@@ -6,3 +6,6 @@ pdf_cache/
 *.db
 *.db-journal
 logs/
+
+# macOS
+.DS_Store

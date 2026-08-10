@@ -85,6 +85,24 @@ python3 02_explore_fields.py  # Visar tillgängliga fält och URL-typer
 - **KB URN-upplösning:** Äldre SOU:er (1922–1996) kräver ett extra steg för att lösa
   PDF-URL:en via KB:s URN-resolver. Kan vara något långsammare.
 
+
+## Svarsstorlek och trunkering
+
+MCP-protokollet har en övre storleksgräns per svar. Den största utredningen i cachen är **1 131 996 tecken** — långt över gränsen.
+`fetch_sou_content` tar därför två parametrar:
+
+| Parameter | Innebörd |
+|---|---|
+| `max_tecken` | Teckentak för texten. Standard 60 000 tecken; `0` ger hela texten som ett uttryckligt val. |
+| `fran_tecken` | Börja vid denna teckenposition — för att läsa vidare där ett kapat svar slutade. |
+
+Ett kapat svar säger alltid ifrån med en rad som anger vilket teckenintervall som visas och det färdiga anropet för att fortsätta. Kapningen sker på ordgräns, aldrig mitt i
+ett ord.
+
+**Vid ordagranna citat:** citera aldrig ur ett svar som är markerat som kapat.
+Läs vidare med `fran_tecken` tills hela passagen är hämtad. Standardvärdet kan
+sättas i `.env` med `SOU_MAX_TECKEN`.
+
 ## Licens
 
 Koden publiceras under [AGPLv3](LICENSE).

@@ -4,9 +4,31 @@ Alla betydande ändringar dokumenteras här.
 Formatet följer [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 Versionshantering följer [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [2.0.0] — 2026-08-10
 
-## [2.0.0] — ej publicerad
+### Tillagt
+
+- **`max_tecken` och `fran_tecken` i `fetch_sou_content`**, med standardtaket
+  `SOU_MAX_TECKEN` (60 000 tecken, konfigurerbart i `.env`). En utredning i cachen är
+  **1 131 996 tecken** som mest, vilket överskrider MCP-protokollets storleksgräns per
+  svar — anropet misslyckades då helt, utan att anroparen hade någon väg runt.
+  Ett kapat svar avslutas med en rad i klartext:
+  `[Visar tecken 1–59 994 av 1 131 996. Läs vidare: fetch_sou_content(namn="…", fran_tecken=59994)]`.
+  Kapningen sker på ordgräns, aldrig mitt i ett ord. `max_tecken=0` ger hela texten
+  som ett uttryckligt val.
+
+### Bakgrund
+
+Genomför projektets svarskontrakt (`00-las-forst.md` → "Svarskontraktet — storlek,
+trunkering, adressering och sökning"). Additiva parametrar och fält; inga brytande
+ändringar och inga schemaändringar. Cachen och databasen lagrar fortfarande hela
+texten — trunkeringen gäller bara svaret till anroparen, så sökning och indexering
+påverkas inte.
+
+---
+
+
+### Ur tidigare opublicerat arbete
 
 ### Brytande ändringar
 - **K6 — Beteckningsformat:** SOU-beteckningar i returobjekt ändrade från `"YYYY/N"` till `"YYYY:N"` för att matcha det format API:et tar emot och som riksdagsdata använder. Berör fältet `sou_beteckning` i svaren från `find_document_relations`.

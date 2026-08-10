@@ -76,6 +76,43 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Standardtak för SOU-fulltext. En utredning kan vara över en miljon tecken och
+# överskrida MCP-protokollets storleksgräns, vilket får anropet att misslyckas
+# helt. Anroparen kan höja taket eller sätta 0 för hela texten.
+SOU_MAX_TECKEN = int(os.getenv("SOU_MAX_TECKEN", "60000"))
+
+
+def _skar_ut_text(text, max_tecken: int, fran_tecken: int = 0, anvisning: str = "") -> str:
+    """
+    Skär ut ett textutdrag och markera alltid när något kapats.
+
+    Trunkering utan markör är ett tyst datafel — svaret ser ut att vara hela
+    utredningen. max_tecken <= 0 betyder ingen trunkering; klipper på ordgräns.
+    """
+    text   = text or ""
+    totalt = len(text)
+    start  = max(0, min(fran_tecken, totalt))
+    rest   = text[start:]
+
+    kapad = bool(max_tecken and max_tecken > 0 and len(rest) > max_tecken)
+    if kapad:
+        utdrag    = rest[:max_tecken]
+        brytpunkt = max(utdrag.rfind(" "), utdrag.rfind("\n"))
+        if brytpunkt > max_tecken * 0.6:
+            utdrag = utdrag[:brytpunkt]
+        utdrag = utdrag.rstrip()
+    else:
+        utdrag = rest
+
+    if not kapad and start == 0:
+        return utdrag
+
+    slut  = start + len(utdrag)
+    noter = [f"Visar tecken {start + 1}–{slut} av {totalt}"]
+    if anvisning:
+        noter.append(anvisning)
+    return utdrag + "\n\n[" + ". ".join(noter) + "]"
+
 
 # ── FD-skydd: förhindrar att C-bibliotek skriver skräp på MCP:s stdout ────────
 
@@ -290,6 +327,21 @@ _TOOL_FETCH_SOU_CONTENT = Tool(
                 "items": {"type": "integer"},
                 "description": "Sidnummer att extrahera (0-indexerat). Utelämna för hela dokumentet."
             },
+            "max_tecken": {
+                "type": "integer",
+                "description": (
+                    "Teckentak för texten (standard 60 000, 0 = hela texten). "
+                    "En utredning kan vara över en miljon tecken; utan tak "
+                    "misslyckas anropet mot svarsgränsen. Ett kapat svar avslutas "
+                    "med en rad som anger hur mycket som visas och hur resten hämtas."
+                ),
+                "default": 60000,
+            },
+            "fran_tecken": {
+                "type": "integer",
+                "description": "Börja texten vid denna teckenposition — för att läsa vidare.",
+                "default": 0,
+            },
         },
         "required": ["url", "namn"],
     },
@@ -431,6 +483,8 @@ async def _fetch_sou_content(
     url: str,
     namn: str,
     sidor: Optional[list[int]] = None,
+    max_tecken: int = SOU_MAX_TECKEN,
+    fran_tecken: int = 0,
 ) -> list[TextContent]:
     if not SOU_HAMTNING_AKTIV:
         return [TextContent(type="text", text="SOU-hämtning är inaktiverad på denna server (SOU_HAMTNING_AKTIV=false i .env).")]
@@ -440,7 +494,10 @@ async def _fetch_sou_content(
         cachad_text = _hamta_fran_pdf_cache(namn)
         if cachad_text:
             logger.info("DB-cache träff för SOU %s", namn)
-            return [TextContent(type="text", text=f"# SOU {namn}\n\n{cachad_text}")]
+            anvisning = (f'Läs vidare: fetch_sou_content(namn="{namn}", '
+                         f"fran_tecken={fran_tecken + max_tecken})")
+            utdrag = _skar_ut_text(cachad_text, max_tecken, fran_tecken, anvisning)
+            return [TextContent(type="text", text=f"# SOU {namn}\n\n{utdrag}")]
 
     # Äldre SOU:er (1922–1996) har KB URN-adresser som kräver upplösning
     if "urn.kb.se" in url:
@@ -476,7 +533,11 @@ async def _fetch_sou_content(
             logger.warning("Kunde inte radera PDF %s: %s", pdf_vag.name, e)
 
     sidor_info = f"sidor {sidor}" if sidor else f"alla {antal_sidor} sidor"
-    return [TextContent(type="text", text=f"# SOU {namn} ({sidor_info})\n\n{text}")]
+    # DB-cachen har alltid hela texten — trunkeringen gäller bara svaret.
+    anvisning = (f'Läs vidare: fetch_sou_content(namn="{namn}", '
+                 f"fran_tecken={fran_tecken + max_tecken})")
+    utdrag = _skar_ut_text(text, max_tecken, fran_tecken, anvisning)
+    return [TextContent(type="text", text=f"# SOU {namn} ({sidor_info})\n\n{utdrag}")]
 
 
 async def _find_document_relations(
