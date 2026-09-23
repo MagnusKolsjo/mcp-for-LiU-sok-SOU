@@ -4,6 +4,49 @@ Alla betydande ändringar dokumenteras här.
 Formatet följer [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 Versionshantering följer [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Ändrat
+
+- **Brytande:** servern kräver MCP Python SDK 2.x (`mcp>=2.0,<3`) och är
+  omskriven till `MCPServer`. Verktygens namn, parametrar, standardvärden och
+  beskrivningar är oförändrade.
+- **Brytande:** http-läget kräver `MCP_API_KEY`. Utan nyckel avbryts uppstarten
+  med exitkod 2 i stället för att servern startar utan autentisering. Fel nyckel
+  ger 403, saknad header 401.
+- **Brytande:** `search_sou`, `get_sou` och `find_document_relations` returnerar
+  strukturerade svar med utdataschema i stället för markdown-text:
+  `search_sou` → `{totalt, visade, traffar}`, `get_sou` → `{namn, delar}`,
+  `find_document_relations` → `{riktning, beteckning, riksdagsdokument}` från en
+  SOU eller `{riktning, beteckning, dokument, sou_beteckningar}` från ett
+  riksdagsdokument. Riksdagsdokumenten har med `dok_id`. `fetch_sou_content`
+  returnerar som förut markdown-text.
+- **Brytande:** förväntade fel ger `isError` med ett förklarande meddelande i
+  stället för en text som börjar med `FEL:`. Det gäller även en SOU- eller
+  riksdagsbeteckning som inte finns.
+- Verktygen har titlar och annotationer som markerar dem som läsande, och
+  verktygslistan har cachningshintar.
+- Verktygen körs på arbetstrådar; PDF-hämtningen och textextraktionen är
+  skyddade av ett lås så att samtidiga anrop inte krockar i filcachen.
+- Serverns instruktioner och README beskriver att LiU:s databas uppdateras med
+  eftersläpning och att nyare SOU:er finns i Riksdagens öppna data.
+- Kontaktadressen för API-nyckel är `ep@ep.liu.se`, som API:et självt anger.
+
+### Rättat
+
+- http-läget startade inte (`streamable_http_app()` anropades på ett objekt som
+  inte fanns). Det går nu via `mcp_transport.py` på standardport 8004.
+- En avvisad `LIU_API_KEY` gav ett obegripligt JSON-tolkningsfel. Svaret känns
+  nu igen och felet säger att nyckeln avvisas och hur en ny begärs.
+- API-nyckeln skrivs inte längre i klartext i loggfilen.
+- En fil som inte går att läsa som PDF ger ett begripligt fel och tas bort ur
+  filcachen, så att nästa försök inte fastnar på samma fil.
+
+### Borttaget
+
+- SSE-transporten och den egna Starlette-appen för autentisering. Streamable
+  HTTP är den enda http-transporten.
+
 ## [2.0.0] — 2026-08-10
 
 ### Tillagt
