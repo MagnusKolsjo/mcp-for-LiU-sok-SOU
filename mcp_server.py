@@ -160,12 +160,41 @@ def _get(url: str, timeout: int = 15) -> bytes:
 
 
 def _liu_sok(params: dict) -> dict:
-    """Anropar LiU:s Solr-API och returnerar svaret som dict."""
+    """Anropar LiU:s Solr-API och returnerar svaret som dict.
+
+    En avvisad nyckel ger HTTP 200 med en kort HTML-text i stället för JSON.
+    Utan särskild kontroll blir det ett obegripligt JSON-tolkningsfel, så
+    svaret känns igen och översätts till ett fel som säger vad som behöver göras.
+    """
     params["api_key"] = LIU_API_KEY
     params["wt"]      = "json"
     url = f"{LIU_API_BASE}?{urllib.parse.urlencode(params)}"
-    logger.info("LiU API: %s", url)
-    return json.loads(_get(url))
+    # Nyckeln hör inte hemma i loggen
+    logger.info("LiU API: %s", url.replace(urllib.parse.quote_plus(LIU_API_KEY), "***"))
+    radata = _get(url)
+    try:
+        return json.loads(radata)
+    except ValueError:
+        text = radata.decode("utf-8", errors="replace")
+        if "api_key" in text:
+            raise LiuNyckelFel(
+                "LiU:s SOU-databas avvisade API-nyckeln (LIU_API_KEY). Nyckeln kan ha "
+                "upphört att gälla. Begär en ny genom att mejla ep@ep.liu.se med ämnet "
+                "'SOU API-nyckel'. Testnyckeln 'test' fungerar under tiden men ger "
+                "högst fem träffar."
+            ) from None
+        raise LiuSvarsFel(
+            "LiU:s SOU-databas svarade inte med JSON. Tjänsten kan vara tillfälligt "
+            "otillgänglig; försök igen senare."
+        ) from None
+
+
+class LiuNyckelFel(RuntimeError):
+    """LiU:s API avvisade den konfigurerade API-nyckeln."""
+
+
+class LiuSvarsFel(RuntimeError):
+    """LiU:s API svarade med något annat än JSON."""
 
 
 def _riksdag_sok(sok: str, doktyp: str = "", antal: int = 20) -> list[dict]:
