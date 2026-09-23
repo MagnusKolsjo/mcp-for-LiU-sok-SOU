@@ -27,7 +27,7 @@ import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Annotated, Literal, NotRequired, Optional, TypedDict
+from typing import Annotated, Callable, Literal, NotRequired, Optional, TypedDict
 
 from dotenv import load_dotenv
 
@@ -108,12 +108,22 @@ SOU_MAX_TECKEN = int(os.getenv("SOU_MAX_TECKEN", "60000"))
 _pdf_las = threading.Lock()
 
 
-def _skar_ut_text(text, max_tecken: int, fran_tecken: int = 0, anvisning: str = "") -> str:
+def _skar_ut_text(
+    text,
+    max_tecken: int,
+    fran_tecken: int = 0,
+    anvisning: Optional[Callable[[int], str]] = None,
+) -> str:
     """
     Skär ut ett textutdrag och markera alltid när något kapats.
 
     Trunkering utan markör är ett tyst datafel — svaret ser ut att vara hela
     utredningen. max_tecken <= 0 betyder ingen trunkering; klipper på ordgräns.
+
+    `anvisning` får utdragets faktiska slutposition och returnerar raden om hur
+    man läser vidare. Positionen måste komma härifrån: kapningen på ordgräns gör
+    utdraget kortare än max_tecken, och en fortsättning vid fran_tecken +
+    max_tecken skulle hoppa över det avkapade ordet.
     """
     text   = text or ""
     totalt = len(text)
@@ -126,7 +136,9 @@ def _skar_ut_text(text, max_tecken: int, fran_tecken: int = 0, anvisning: str = 
         brytpunkt = max(utdrag.rfind(" "), utdrag.rfind("\n"))
         if brytpunkt > max_tecken * 0.6:
             utdrag = utdrag[:brytpunkt]
-        utdrag = utdrag.rstrip()
+        # Ett utdrag som bara består av blanktecken skulle ge slut == start,
+        # och läs-vidare-raden skulle då peka på samma ställe igen.
+        utdrag = utdrag.rstrip() or rest[:max_tecken]
     else:
         utdrag = rest
 
@@ -135,8 +147,8 @@ def _skar_ut_text(text, max_tecken: int, fran_tecken: int = 0, anvisning: str = 
 
     slut  = start + len(utdrag)
     noter = [f"Visar tecken {start + 1}–{slut} av {totalt}"]
-    if anvisning:
-        noter.append(anvisning)
+    if kapad and anvisning is not None:
+        noter.append(anvisning(slut))
     return utdrag + "\n\n[" + ". ".join(noter) + "]"
 
 
@@ -456,6 +468,24 @@ def get_sou(
     return {"namn": namn, "delar": [_sou_post(doc) for doc in docs]}
 
 
+def _las_vidare(
+    url: str, namn: str, sidor: Optional[list[int]], max_tecken: int,
+) -> Callable[[int], str]:
+    """Bygger läs-vidare-raden som ett komplett anrop med alla obligatoriska argument.
+
+    sidor följer med, eftersom teckenpositionerna gäller texten för just de
+    sidorna; utan dem pekar positionen in i hela dokumentets text.
+    """
+    def rad(slut: int) -> str:
+        argument = [f'url="{url}"', f'namn="{namn}"']
+        if sidor is not None:
+            argument.append(f"sidor={sidor}")
+        argument.append(f"max_tecken={max_tecken}")
+        argument.append(f"fran_tecken={slut}")
+        return f"Läs vidare: fetch_sou_content({', '.join(argument)})"
+    return rad
+
+
 @mcp.tool(
     title="Läs text ur en SOU",
     annotations=LASNING_EXTERN,
@@ -482,14 +512,16 @@ def fetch_sou_content(
     )] = 0,
 ) -> str:
     """Laddar ned och extraherar text ur en SOU-PDF. Hanterar automatiskt moderna digitala SOU:er (1997+) och äldre KB-digitaliserade skanningar (1922–1996) med OCR-fallback. PDF-URL:en hämtas med get_sou eller search_sou. Fulltext för hela dokument cachas i databasen — efterföljande anrop returnerar direkt från cache utan ny nedladdning. Stora dokument kan ta 10–30 sekunder vid första hämtning."""
+    url_in = url
     # Kontrollera DB-cache för hela dokument (inte delsidor — de är tillfälliga förfrågningar)
     if sidor is None:
         cachad_text = _hamta_fran_pdf_cache(namn)
         if cachad_text:
             logger.info("DB-cache träff för SOU %s", namn)
-            anvisning = (f'Läs vidare: fetch_sou_content(namn="{namn}", '
-                         f"fran_tecken={fran_tecken + max_tecken})")
-            utdrag = _skar_ut_text(cachad_text, max_tecken, fran_tecken, anvisning)
+            utdrag = _skar_ut_text(
+                cachad_text, max_tecken, fran_tecken,
+                _las_vidare(url, namn, sidor, max_tecken),
+            )
             return f"# SOU {namn}\n\n{utdrag}"
 
     # Äldre SOU:er (1922–1996) har KB URN-adresser som kräver upplösning
@@ -535,9 +567,9 @@ def fetch_sou_content(
 
     sidor_info = f"sidor {sidor}" if sidor else f"alla {antal_sidor} sidor"
     # DB-cachen har alltid hela texten — trunkeringen gäller bara svaret.
-    anvisning = (f'Läs vidare: fetch_sou_content(namn="{namn}", '
-                 f"fran_tecken={fran_tecken + max_tecken})")
-    utdrag = _skar_ut_text(text, max_tecken, fran_tecken, anvisning)
+    utdrag = _skar_ut_text(
+        text, max_tecken, fran_tecken, _las_vidare(url_in, namn, sidor, max_tecken),
+    )
     return f"# SOU {namn} ({sidor_info})\n\n{utdrag}"
 
 

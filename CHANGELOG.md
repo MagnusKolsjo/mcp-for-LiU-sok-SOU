@@ -39,6 +39,12 @@ Versionshantering följer [Semantic Versioning](https://semver.org/).
 - En avvisad `LIU_API_KEY` gav ett obegripligt JSON-tolkningsfel. Svaret känns
   nu igen och felet säger att nyckeln avvisas och hur en ny begärs.
 - API-nyckeln skrivs inte längre i klartext i loggfilen.
+- Läs vidare-raden i ett kapat svar från `fetch_sou_content` pekade på
+  `fran_tecken + max_tecken`. Kapningen sker på ordgräns, så nästa utdrag
+  hoppade över det avkapade ordet. Raden anger nu utdragets faktiska slut, så att
+  på varandra följande utdrag tillsammans blir exakt den sammanhängande texten.
+  Raden är dessutom ett komplett anrop med `url` (obligatorisk), `max_tecken`
+  och, när de angetts, `sidor`. Det sista utdraget har ingen läs vidare-rad.
 - En fil som inte går att läsa som PDF ger ett begripligt fel och tas bort ur
   filcachen, så att nästa försök inte fastnar på samma fil.
 
