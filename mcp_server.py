@@ -15,7 +15,6 @@ Databas styrs via DATABASE_URL: postgresql://... eller sqlite:///...
 SOU_SOKNING_AKTIV / SOU_HAMTNING_AKTIV styr om sök- resp. hämtningsverktyg exponeras.
 """
 
-import contextlib
 import json
 import logging
 import os
@@ -40,7 +39,6 @@ _SCRIPT_DIR = Path(__file__).parent.resolve()
 load_dotenv(_SCRIPT_DIR / ".env")
 
 import pymupdf  # noqa: E402
-import pymupdf4llm  # noqa: E402
 from mcp.server.mcpserver import MCPServer  # noqa: E402
 from mcp.server.mcpserver.exceptions import ToolError  # noqa: E402
 from pydantic import Field  # noqa: E402
@@ -54,6 +52,7 @@ from db import (  # noqa: E402
 )
 from mcp_annotationer import CACHE_HINTAR, LASNING_EXTERN  # noqa: E402
 from mcp_transport import starta  # noqa: E402
+from pdftext_skydd import extrahera_pdf  # noqa: E402
 
 LIU_API_KEY  = os.getenv("LIU_API_KEY", "test")
 LIU_API_BASE = os.getenv("LIU_API_BASE", "https://www2.bibl.liu.se/api/sou_api/getdata.aspx")
@@ -103,8 +102,7 @@ SOU_MAX_TECKEN = int(os.getenv("SOU_MAX_TECKEN", "60000"))
 
 # Synkrona verktyg körs på arbetstrådar, så två PDF-hämtningar kan pågå samtidigt.
 # Låset serialiserar hela PDF-kedjan: filcachen (två trådar får inte skriva och
-# radera samma fil) och fd-omdirigeringen i _tysta_subprocess_stdout, som gäller
-# hela processen och annars kan återställas i fel ordning.
+# radera samma fil) under nedladdning och extraktion.
 _pdf_las = threading.Lock()
 
 
@@ -150,33 +148,6 @@ def _skar_ut_text(
     if kapad and anvisning is not None:
         noter.append(anvisning(slut))
     return utdrag + "\n\n[" + ". ".join(noter) + "]"
-
-
-# ── FD-skydd: samlar C-bibliotekens diagnostik i en loggfil ────────────────────
-
-@contextlib.contextmanager
-def _tysta_subprocess_stdout():
-    """Omdirigerar FD 1+2 till loggfil under C-bundna biblioteksanrop.
-
-    pymupdf och OCR-steget skriver diagnostik direkt på filbeskrivarna, förbi
-    Pythons loggning. Omdirigeringen samlar den i logs/subprocess.log i stället
-    för att fylla klientens stderr-logg. Den gäller hela processen och får bara
-    köras under _pdf_las.
-    """
-    log_path = LOG_DIR / "subprocess.log"
-    spara_ut  = os.dup(1)
-    spara_fel = os.dup(2)
-    log_fd = os.open(str(log_path), os.O_WRONLY | os.O_APPEND | os.O_CREAT)
-    try:
-        os.dup2(log_fd, 1)
-        os.dup2(log_fd, 2)
-        yield
-    finally:
-        os.dup2(spara_ut, 1)
-        os.dup2(spara_fel, 2)
-        os.close(spara_ut)
-        os.close(spara_fel)
-        os.close(log_fd)
 
 
 # ── HTTP-hjälpfunktioner ───────────────────────────────────────────────────────
@@ -294,13 +265,23 @@ def _hamta_och_casha_pdf(url: str, cache_nyckel: str) -> Path:
     return cache_fil
 
 
-def _extrahera_text(pdf_vag: Path, sidor: Optional[list[int]] = None) -> str:
-    """Extraherar text ur PDF med pymupdf4llm. OCR körs automatiskt vid behov."""
-    with _tysta_subprocess_stdout():
-        kwargs = {}
-        if sidor is not None:
-            kwargs["pages"] = sidor
-        return pymupdf4llm.to_markdown(str(pdf_vag), **kwargs)
+def _extrahera_text(pdf_vag: Path, kalla_id: str, kalla_url: str,
+                    sidor: Optional[list[int]] = None) -> str:
+    """Extraherar text ur PDF under minnes- och tidsvakt (pdftext_skydd.extrahera_pdf).
+
+    Extraktionen körs i en egen process, i sidblock, med OCR-språket satt
+    explicit (LIU_OCR_SPRAK, standard "swe+eng"). Dokument där sidor saknar
+    textlager, eller där ett block fick läsas med ren textutvinning, läggs i
+    OCR-kön (ocr_ko/) för att kunna köras genom bättre OCR senare.
+    """
+    res = extrahera_pdf(
+        pdf_vag, prefix="LIU", standardsprak="swe+eng",
+        kalla_id=kalla_id, kalla_url=kalla_url, sidor=sidor,
+    )
+    if res.i_ocr_ko:
+        logger.info("SOU %s lades i OCR-kön (metod=%s, orsak=%s)",
+                    kalla_id, res.metod, res.orsak)
+    return res.text
 
 
 # ── Svarstyper ─────────────────────────────────────────────────────────────────
@@ -553,7 +534,7 @@ def fetch_sou_content(
                 f"Filen på {url} gick inte att läsa som PDF. Kontrollera URL:en med get_sou."
             ) from e
 
-        text = _extrahera_text(pdf_vag, sidor)
+        text = _extrahera_text(pdf_vag, namn, url, sidor)
 
         # Spara hela dokument i DB-cache och radera PDF-filen direkt
         if sidor is None:
