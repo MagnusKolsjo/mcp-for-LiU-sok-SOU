@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 *.pyo
 pdf_cache/
+ocr_ko/
 *.db
 *.db-journal
 logs/

@@ -6,6 +6,19 @@ Versionshantering följer [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Tillagt
+
+- Skyddad PDF-extraktion (`pdftext_skydd.py`): extraktionen körs i en egen
+  process, i block om `LIU_PDF_SIDBLOCK` sidor, under en minnesvakt
+  (`LIU_PDF_MAX_MINNE_MB`) och tidsgräns (`LIU_PDF_TIDSGRANS_S`) per block. Ett
+  block som passerar gränserna läses med ren textutvinning i stället, så att
+  ett enskilt bildtungt dokument inte kan fälla servern.
+- OCR-kö (`ocr_ko/ko.jsonl` + `ocr_ko/filer/`, mappen styrs av
+  `LIU_OCR_KO_MAPP`): dokument med sidor utan textlager, eller där ett block
+  fick läsas med ren textutvinning, noteras här tillsammans med en kopia av
+  PDF:en, så att de kan köras genom en bättre OCR senare utan att laddas ned
+  igen.
+
 ### Ändrat
 
 - **Brytande:** servern kräver MCP Python SDK 2.x (`mcp>=2.0,<3`) och är
@@ -34,6 +47,10 @@ Versionshantering följer [Semantic Versioning](https://semver.org/).
 
 ### Rättat
 
+- OCR-språket för sidor utan textlager var engelska, eftersom inget uttryckligt
+  språk angavs till `pymupdf4llm`. Svenska tecken (å, ä, ö) i OCR-lästa SOU:er
+  blev därför fel. OCR-språket sätts nu uttryckligen med `LIU_OCR_SPRAK`
+  (standard `swe+eng`).
 - http-läget startade inte (`streamable_http_app()` anropades på ett objekt som
   inte fanns). Det går nu via `mcp_transport.py` på standardport 8004.
 - En avvisad `LIU_API_KEY` gav ett obegripligt JSON-tolkningsfel. Svaret känns
@@ -50,6 +67,9 @@ Versionshantering följer [Semantic Versioning](https://semver.org/).
 
 ### Borttaget
 
+- Den egna filbeskrivaromdirigeringen kring `pymupdf4llm`-anropet
+  (`_tysta_subprocess_stdout`). Extraktionen körs nu i en egen process i
+  `pdftext_skydd.py`, så den behövs inte längre.
 - SSE-transporten och den egna Starlette-appen för autentisering. Streamable
   HTTP är den enda http-transporten.
 

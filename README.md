@@ -108,6 +108,24 @@ python3 01_test_api.py        # Verifierar API-anrop och svarsformat
 python3 02_explore_fields.py  # Visar tillgängliga fält och URL-typer
 ```
 
+## PDF-extraktion och OCR
+
+PDF:erna görs om till markdown med `pdftext_skydd.py`. Tre saker skyddar
+servern:
+
+- **OCR-språk.** Sidor utan textlager OCR:as med Tesseract på språken i
+  `LIU_OCR_SPRAK` (standard `swe+eng`). Utan uttryckligt språk används
+  engelska, och å, ä och ö blir fel.
+- **Minnesvakt.** Extraktionen körs i en egen process i block om
+  `LIU_PDF_SIDBLOCK` sidor. Passerar processen `LIU_PDF_MAX_MINNE_MB` eller
+  `LIU_PDF_TIDSGRANS_S` avbryts den, och blocket läses med ren textutvinning
+  i stället. Ett enskilt bildtungt dokument kan då inte fälla datorn eller
+  servern.
+- **OCR-kön.** Dokument med sidor utan textlager, eller med block som lästes
+  med ren textutvinning, noteras i `ocr_ko/ko.jsonl`, och PDF:en sparas i
+  `ocr_ko/filer/`. De kan senare köras genom en bättre OCR utan att laddas
+  ned igen. Mappen styrs av `LIU_OCR_KO_MAPP`.
+
 ## Kända begränsningar
 
 - **Testnyckelns 5-träffarsgräns:** `rows`-parametern ignoreras med testnyckel `test`.
