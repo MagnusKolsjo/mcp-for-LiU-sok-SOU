@@ -73,7 +73,7 @@ En nyckel som inte längre godtas ger ett tydligt fel från `search_sou` och
 
 ## Konfiguration i MCP-klient
 
-Lägg till i din MCP-klientkonfiguration (t.ex. `claude_desktop_config.json`):
+Lägg till i din MCP-klientkonfiguration (`mcpServers`):
 
 ```json
 "liu-sou": {

@@ -23,6 +23,7 @@ Versionshantering följer [Semantic Versioning](https://semver.org/).
 
 ### Ändrat
 
+- Texterna är produktneutrala: README, konfigurationsexempel, kommentarer och äldre CHANGELOG-poster nämner MCP-klienten i stället för en viss klient.
 - User-Agent-strängen följer huvudversionen: `mcp-for-LiU-sok-SOU/3.0`.
 - **Brytande:** servern kräver MCP Python SDK 2.x (`mcp>=2.0,<3`) och är
   omskriven till `MCPServer`. Verktygens namn, parametrar, standardvärden och
