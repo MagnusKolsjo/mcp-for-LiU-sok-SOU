@@ -41,7 +41,7 @@ from dotenv import load_dotenv
 load_dotenv()
 API_KEY = os.getenv("LIU_API_KEY", "test")
 API_BASE = os.getenv("LIU_API_BASE", "https://www2.bibl.liu.se/api/sou_api/getdata.aspx")
-HEADERS = {"User-Agent": "mcp-for-LiU-sok-SOU/1.0 (+https://github.com/MagnusKolsjo/mcp-for-LiU-sok-SOU)"}
+HEADERS = {"User-Agent": "mcp-for-LiU-sok-SOU/3.0 (+https://github.com/MagnusKolsjo/mcp-for-LiU-sok-SOU)"}
 
 
 def sok(params: dict) -> dict:

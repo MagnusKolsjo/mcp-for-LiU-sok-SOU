@@ -6,6 +6,8 @@ Versionshantering följer [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [3.0.0] — 2026-09-26
+
 ### Tillagt
 
 - Skyddad PDF-extraktion (`pdftext_skydd.py`): extraktionen körs i en egen
@@ -21,6 +23,7 @@ Versionshantering följer [Semantic Versioning](https://semver.org/).
 
 ### Ändrat
 
+- User-Agent-strängen följer huvudversionen: `mcp-for-LiU-sok-SOU/3.0`.
 - **Brytande:** servern kräver MCP Python SDK 2.x (`mcp>=2.0,<3`) och är
   omskriven till `MCPServer`. Verktygens namn, parametrar, standardvärden och
   beskrivningar är oförändrade.
@@ -145,4 +148,5 @@ påverkas inte.
 - Relativa cache-sökvägar ankras mot skriptets mapp (skyddar mot skrivskyddat cwd i MCP-klienter)
 - stdio- och HTTP-transportstöd med Bearer-token-autentisering i HTTP-läget
 
+[3.0.0]: https://github.com/MagnusKolsjo/mcp-for-LiU-sok-SOU/releases/tag/v3.0.0
 [1.0.0]: https://github.com/MagnusKolsjo/mcp-for-LiU-sok-SOU/releases/tag/v1.0.0

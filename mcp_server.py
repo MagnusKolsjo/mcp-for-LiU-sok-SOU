@@ -67,7 +67,7 @@ SOU_HAMTNING_AKTIV  = os.getenv("SOU_HAMTNING_AKTIV", "true").lower() == "true"
 RIKSDAG_DOK_BASE  = "https://data.riksdagen.se/dokumentlista/"
 RIKSDAG_TEXT_BASE = "https://data.riksdagen.se/dokument/"
 
-HEADERS = {"User-Agent": "mcp-for-LiU-sok-SOU/1.0 (+https://github.com/MagnusKolsjo/mcp-for-LiU-sok-SOU)"}
+HEADERS = {"User-Agent": "mcp-for-LiU-sok-SOU/3.0 (+https://github.com/MagnusKolsjo/mcp-for-LiU-sok-SOU)"}
 
 # Årsöversikter som nämner i stort sett alla SOU:er — filtreras bort som brus.
 BRUS_TITLAR = [
@@ -76,7 +76,7 @@ BRUS_TITLAR = [
 ]
 
 # Versionen följer senaste släppta version i CHANGELOG.md.
-SERVERVERSION = "2.0.0"
+SERVERVERSION = "3.0.0"
 
 # ── Loggning ───────────────────────────────────────────────────────────────────
 
