@@ -76,7 +76,7 @@ BRUS_TITLAR = [
 ]
 
 # Versionen följer senaste släppta version i CHANGELOG.md.
-SERVERVERSION = "3.0.0"
+SERVERVERSION = "3.0.1"
 
 # ── Loggning ───────────────────────────────────────────────────────────────────
 

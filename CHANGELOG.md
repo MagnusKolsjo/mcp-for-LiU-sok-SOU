@@ -6,6 +6,8 @@ Versionshantering följer [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [3.0.1] — 2026-10-06
+
 ### Fixat
 
 - onnxruntime, som `pymupdf4llm` laddar för layout och OCR, skickade som standard användningsdata
@@ -157,5 +159,6 @@ påverkas inte.
 - Relativa cache-sökvägar ankras mot skriptets mapp (skyddar mot skrivskyddat cwd i MCP-klienter)
 - stdio- och HTTP-transportstöd med Bearer-token-autentisering i HTTP-läget
 
+[3.0.1]: https://github.com/MagnusKolsjo/mcp-for-LiU-sok-SOU/releases/tag/v3.0.1
 [3.0.0]: https://github.com/MagnusKolsjo/mcp-for-LiU-sok-SOU/releases/tag/v3.0.0
 [1.0.0]: https://github.com/MagnusKolsjo/mcp-for-LiU-sok-SOU/releases/tag/v1.0.0
